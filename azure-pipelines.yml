@@ -1,0 +1,208 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  azureServiceConnection: 'moath-sp-new'
+  acrName: 'moathclinicacr'
+  imageName: 'moathclinic-app'
+  resourceGroupName: 'moathclinic-rg'
+  aksClusterName: 'moathclinic-aks'
+  dbAdminLogin: 'moathclinic_admin'
+  terraformDir: '$(System.DefaultWorkingDirectory)/terraform'
+  terraformVersion: '1.7.5'
+  trivySeverity: 'HIGH,CRITICAL'
+  isMain: $[eq(variables['Build.SourceBranch'], 'refs/heads/main')]
+
+stages:
+  # ---------------------------------------------------------------------
+  # 1. Terraform: always plan, apply only when running on main
+  # ---------------------------------------------------------------------
+  - stage: Terraform
+    displayName: 'Terraform Plan/Apply'
+    jobs:
+      - job: TerraformJob
+        displayName: 'Terraform'
+        steps:
+          - task: Bash@3
+            displayName: 'Install Terraform $(terraformVersion)'
+            inputs:
+              targetType: inline
+              script: |
+                set -e
+                curl -sLo /tmp/terraform.zip https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip
+                unzip -o /tmp/terraform.zip -d /tmp/tfinstall
+                sudo mv /tmp/tfinstall/terraform /usr/local/bin/
+                terraform version
+
+          - task: AzureCLI@2
+            name: tf
+            displayName: 'Terraform Init / Plan / Apply'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -e
+                export ARM_CLIENT_ID=$servicePrincipalId
+                export ARM_TENANT_ID=$tenantId
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+                export ARM_USE_OIDC=true
+                export ARM_OIDC_TOKEN=$idToken
+
+                cd $(terraformDir)
+                terraform init -input=false
+                terraform validate
+                terraform plan -input=false -out=tfplan
+
+                if [ "$(isMain)" = "True" ]; then
+                  echo "On main branch: applying"
+                  terraform apply -input=false -auto-approve tfplan
+                else
+                  echo "Not main branch: skipping apply"
+                fi
+
+                # Publish outputs for later stages (only meaningful once resources exist)
+                DB_FQDN=$(terraform output -raw db_fqdn)
+                DB_PASSWORD=$(terraform output -raw db_password)
+                ACR_LOGIN_SERVER=$(terraform output -raw acr_login_server)
+                APP_INSIGHTS_CONNECTION_STRING=$(terraform output -raw app_insights_connection_string)
+
+                echo "##vso[task.setvariable variable=dbFqdn;isOutput=true]$DB_FQDN"
+                echo "##vso[task.setvariable variable=dbPassword;isOutput=true;issecret=true]$DB_PASSWORD"
+                echo "##vso[task.setvariable variable=acrLoginServer;isOutput=true]$ACR_LOGIN_SERVER"
+                echo "##vso[task.setvariable variable=appInsightsConnectionString;isOutput=true;issecret=true]$APP_INSIGHTS_CONNECTION_STRING"
+
+  # ---------------------------------------------------------------------
+  # 2. Build & push the Docker image to ACR (main branch only)
+  # ---------------------------------------------------------------------
+  - stage: BuildAndPush
+    displayName: 'Build & Push Image'
+    dependsOn: Terraform
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: BuildJob
+        displayName: 'Build & Push'
+        steps:
+          - task: AzureCLI@2
+            displayName: 'az acr build'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -e
+                az acr build \
+                  --registry $(acrName) \
+                  --resource-group $(resourceGroupName) \
+                  --image $(imageName):$(Build.BuildId) \
+                  --image $(imageName):latest \
+                  ./app
+
+  # ---------------------------------------------------------------------
+  # 3. Security scan: Trivy image scan gates the deploy (main branch only)
+  # ---------------------------------------------------------------------
+  - stage: SecurityScan
+    displayName: 'Container Image Scan (Trivy)'
+    dependsOn: BuildAndPush
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    variables:
+      acrLoginServer: $[ stageDependencies.Terraform.TerraformJob.outputs['tf.acrLoginServer'] ]
+    jobs:
+      - job: TrivyScan
+        displayName: 'Trivy scan'
+        steps:
+          - task: AzureCLI@2
+            displayName: 'Install Trivy & scan image'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -e
+                curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+                az acr login --name $(acrName)
+
+                trivy image \
+                  --severity $(trivySeverity) \
+                  --exit-code 1 \
+                  --ignore-unfixed \
+                  $(acrLoginServer)/$(imageName):$(Build.BuildId)
+
+  # ---------------------------------------------------------------------
+  # 4. Deploy to AKS (main branch only, gated on a clean security scan)
+  # ---------------------------------------------------------------------
+  - stage: DeployToAKS
+    displayName: 'Deploy to AKS'
+    dependsOn:
+      - Terraform
+      - BuildAndPush
+      - SecurityScan
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    variables:
+      dbFqdn: $[ stageDependencies.Terraform.TerraformJob.outputs['tf.dbFqdn'] ]
+      dbPassword: $[ stageDependencies.Terraform.TerraformJob.outputs['tf.dbPassword'] ]
+      acrLoginServer: $[ stageDependencies.Terraform.TerraformJob.outputs['tf.acrLoginServer'] ]
+      appInsightsConnectionString: $[ stageDependencies.Terraform.TerraformJob.outputs['tf.appInsightsConnectionString'] ]
+    jobs:
+      - deployment: Deploy
+        displayName: 'Deploy manifests'
+        environment: 'moathclinic-production'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - task: AzureCLI@2
+                  displayName: 'Get AKS credentials'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -e
+                      az aks get-credentials \
+                        --resource-group $(resourceGroupName) \
+                        --name $(aksClusterName) \
+                        --overwrite-existing
+
+                - task: AzureCLI@2
+                  displayName: 'Create/update secrets'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -e
+                      DATABASE_URL="postgresql://$(dbAdminLogin):$(dbPassword)@$(dbFqdn):5432/moathclinic?sslmode=require"
+                      kubectl create secret generic moathclinic-db-secret \
+                        --from-literal=DATABASE_URL="$DATABASE_URL" \
+                        --dry-run=client -o yaml | kubectl apply -f -
+
+                      kubectl create secret generic moathclinic-appinsights-secret \
+                        --from-literal=APPLICATIONINSIGHTS_CONNECTION_STRING="$(appInsightsConnectionString)" \
+                        --dry-run=client -o yaml | kubectl apply -f -
+
+                - task: AzureCLI@2
+                  displayName: 'Apply manifests'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -e
+                      IMAGE="$(acrLoginServer)/$(imageName):$(Build.BuildId)"
+                      sed "s#__IMAGE__#$IMAGE#" $(System.DefaultWorkingDirectory)/k8s/deployment.yaml | kubectl apply -f -
+                      kubectl apply -f $(System.DefaultWorkingDirectory)/k8s/service.yaml
+                      kubectl rollout status deployment/moathclinic-app --timeout=120s
