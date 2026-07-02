@@ -86,3 +86,35 @@ account — never commit `*.tfstate` (already gitignored).
   it to require manual sign-off before deploys)
 - Trivy needs no separate credentials — it authenticates against ACR via `az acr login` in the
   same pipeline identity as the build stage
+
+## Branching & contribution workflow
+
+`main` is treated as protected — it should only ever move forward via a reviewed pull request,
+never a direct push (infrastructure changes go through `terraform plan`-on-PR before anyone
+applies them).
+
+1. Branch off `main`: `git checkout -b <type>/<short-description>` (`feat/`, `fix/`, `chore/`,
+   `infra/` prefixes)
+2. Commit, push the branch, open a PR into `main`
+3. Once branch protection is enabled (see below), the PR must be reviewed/approved and pass
+   required checks before it can merge
+4. Squash or merge via GitHub once green; delete the feature branch
+
+**One-time setup (GitHub UI or `gh` CLI, needs repo admin access):**
+
+Settings → Branches → Add branch protection rule for `main`:
+- Require a pull request before merging
+- Require conversation resolution before merging
+- (Once CI checks are wired to GitHub, e.g. the PR-check workflow below) require status checks
+  to pass before merging
+
+Equivalent with the GitHub CLI, once authenticated (`gh auth login`):
+
+```bash
+gh api repos/mmalkawi-tech/Moath_project/branches/main/protection \
+  --method PUT \
+  -f required_pull_request_reviews.required_approving_review_count=1 \
+  -F enforce_admins=true \
+  -F required_status_checks=null \
+  -F restrictions=null
+```
