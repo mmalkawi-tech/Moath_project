@@ -188,20 +188,23 @@ promotes to `main` for production.
 3. Promote via PR: `develop` → `test` (deploys to **test**), `test` → `main` (deploys to
    **production**, behind the approval gate)
 
-**One-time setup (GitHub UI or `gh` CLI, needs repo admin access):**
-
-Settings → Branches → Add a branch protection rule for `main` (and optionally `test`/`develop`):
-- Require a pull request before merging
-- Require conversation resolution before merging
-- (Once CI checks are wired to GitHub) require status checks to pass before merging
-
-Equivalent with the GitHub CLI, once authenticated (`gh auth login`):
+**`main` branch protection is enabled**: pull request required (0 required approvals, since
+this is a solo-maintainer repo and GitHub won't count self-approval anyway), conversation
+resolution required, enforced for admins too, no force-push or deletion. Configured via:
 
 ```bash
-gh api repos/mmalkawi-tech/Moath_project/branches/main/protection \
-  --method PUT \
-  -f required_pull_request_reviews.required_approving_review_count=1 \
-  -F enforce_admins=true \
-  -F required_status_checks=null \
-  -F restrictions=null
+cat > protection.json <<'EOF'
+{
+  "required_status_checks": null,
+  "enforce_admins": true,
+  "required_pull_request_reviews": { "required_approving_review_count": 0 },
+  "restrictions": null,
+  "required_conversation_resolution": true
+}
+EOF
+gh api repos/mmalkawi-tech/Moath_project/branches/main/protection --method PUT --input protection.json
 ```
+
+(`required_status_checks` is left unset rather than pinned to the current tfsec/terraform-validate
+matrix job names — those change whenever an environment is added or renamed, and a stale required
+check name silently blocks all merges. Revisit once the check set stabilizes.)
