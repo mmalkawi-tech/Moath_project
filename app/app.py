@@ -1,7 +1,6 @@
 """
 Moath Clinic - Pharmacy & Prescription Management API
 """
-import logging
 import os
 from datetime import date, datetime
 
@@ -14,13 +13,12 @@ app = Flask(__name__)
 
 APPINSIGHTS_CONNECTION_STRING = os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING")
 if APPINSIGHTS_CONNECTION_STRING:
-    from opencensus.ext.azure.log_exporter import AzureLogHandler
-    from opencensus.ext.flask.flask_middleware import FlaskMiddleware
+    # azure-monitor-opentelemetry auto-instruments Flask + logging + requests;
+    # it's the actively maintained successor to the opencensus exporters
+    # (which cap at Flask<3.0 and no longer receive updates).
+    from azure.monitor.opentelemetry import configure_azure_monitor
 
-    logger = logging.getLogger(__name__)
-    logger.addHandler(AzureLogHandler(connection_string=APPINSIGHTS_CONNECTION_STRING))
-    logger.setLevel(logging.INFO)
-    FlaskMiddleware(app)
+    configure_azure_monitor(connection_string=APPINSIGHTS_CONNECTION_STRING)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///local_dev.db")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)

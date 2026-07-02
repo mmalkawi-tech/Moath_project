@@ -56,7 +56,11 @@ cost (one Basic-tier ACR instead of three).
 ### Compute
 - **AKS** per environment: `sku_tier = "Free"` (no control-plane SLA charge), burstable
   `Standard_B2s` nodes — 1 node in dev/test, 2 in production. System-assigned identity with
-  `AcrPull` scoped to the shared ACR. Container Insights enabled via `oms_agent`.
+  `AcrPull` scoped to the shared ACR. Container Insights enabled via `oms_agent`. Kubernetes
+  RBAC and a `calico` network policy (works with the default `kubenet` plugin at no extra
+  cost) are both enabled. The API server is *not* IP-restricted — that would lock out the
+  Azure DevOps Microsoft-hosted agents that run the pipeline; see the `tfsec:ignore` comment in
+  `modules/aks/main.tf` for the accepted-risk rationale.
 - **ACR** (shared, `moathclinicacr`): Basic SKU, images built directly in the registry via
   `az acr build` — one image per pipeline run, deployed into whichever environment the
   triggering branch maps to.
@@ -82,13 +86,21 @@ cost (one Basic-tier ACR instead of three).
   separate so telemetry doesn't mix across environments), 30-day retention (minimum for
   `PerGB2018`, cheapest tier).
 - Connection string injected into the app via a namespaced `moathclinic-appinsights-secret` and
-  `APPLICATIONINSIGHTS_CONNECTION_STRING`; the Flask app attaches `opencensus`'s
-  `FlaskMiddleware`/`AzureLogHandler` only when that var is present.
+  `APPLICATIONINSIGHTS_CONNECTION_STRING`; the Flask app calls
+  `azure-monitor-opentelemetry`'s `configure_azure_monitor()` only when that var is present,
+  auto-instrumenting Flask, logging, and outbound requests.
 
 ### CI/CD
 
+GitHub Actions (`.github/workflows/pr-checks.yml`) runs credential-free checks on every PR —
+pytest, `terraform fmt`/`validate` (matrixed per root), and a matrixed tfsec scan (scanning the
+whole `terraform/` tree in one pass doesn't work; tfsec stops after the first root it finds).
+
+The Azure DevOps pipeline (`azure-pipelines.yml`) does the real build/scan/deploy:
+
 | Stage | Trigger | What it does |
 |-------|---------|---------------|
+| Unit Tests | Every push/PR | pytest, published as JUnit results; gates the build. |
 | Terraform - Shared ACR | Every push/PR on `main`/`test`/`develop` | `init`/`validate`/`plan` always; `apply` on any deploy branch (idempotent). |
 | Build & Push | Any deploy branch | `az acr build` tags the image with the build ID. |
 | Security Scan | After build | Trivy scans for HIGH/CRITICAL CVEs; failure blocks every environment's deploy. |
