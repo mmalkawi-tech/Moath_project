@@ -12,11 +12,15 @@ observability. Every resource is sized on the cheapest viable Azure tier.
   dev/test/production, built from reusable modules; remote state in Azure Blob Storage, one
   state file per environment
 - **Runtime**: Kubernetes manifests for AKS (`k8s/`) — Kustomize base + per-environment overlays
-- **CI/CD**: Azure DevOps Pipeline (`azure-pipelines.yml` + `pipelines/templates/`), source
-  hosted on GitHub
-- **Security**: Trivy container image scan gates every deploy
+- **CI/CD**: Azure DevOps Pipeline (`azure-pipelines.yml` + `pipelines/templates/`) for
+  build/scan/deploy, plus a lightweight GitHub Actions workflow
+  (`.github/workflows/pr-checks.yml`) for fast, credential-free PR feedback
+- **Testing**: pytest unit tests for the API (`app/tests/`), gating the build in both pipelines
+- **Security**: Trivy container image scan gates every deploy; tfsec scans the Terraform on every
+  PR
 - **Monitoring**: Azure Monitor Container Insights (cluster/pod metrics & logs) + Application
-  Insights (in-app request/exception telemetry via `opencensus`) — one workspace per environment
+  Insights (in-app request/exception telemetry via `azure-monitor-opentelemetry`) — one workspace
+  per environment
 
 See [docs/architecture.md](docs/architecture.md) for the full diagram and component breakdown.
 
@@ -40,16 +44,28 @@ Cost choices, applied everywhere:
 - **Networking**: dev/test stay `ClusterIP` (no public IP / LoadBalancer cost); only production
   gets a `LoadBalancer` Service
 
-## Pipeline
+## Pipelines
 
-Triggered on every push/PR to `main`, `test`, or `develop`. Stages:
+**GitHub Actions** (`.github/workflows/pr-checks.yml`) — runs on every PR into `main`/`test`/
+`develop`, no Azure credentials needed:
+- `python-tests` — installs `app/requirements-dev.txt`, runs `pytest`
+- `terraform-fmt` — `terraform fmt -check -recursive` across all of `terraform/`
+- `terraform-validate` — `init -backend=false` + `validate`, matrixed over `acr` and each
+  environment root
+- `tfsec` — IaC security scan, matrixed the same way (scanning the whole `terraform/` tree in
+  one shot doesn't work — tfsec treats each directory as its own root and silently stops after
+  the first one; scanning per-root correctly resolves each environment's `module` blocks)
 
-1. **Terraform - Shared ACR** — `init`/`validate`/`plan` always; `apply` on any of the three
+**Azure DevOps** (`azure-pipelines.yml`) — the actual build/scan/deploy pipeline, triggered on
+every push/PR to `main`, `test`, or `develop`:
+
+1. **Unit Tests** — same pytest suite, published as JUnit results; gates the build.
+2. **Terraform - Shared ACR** — `init`/`validate`/`plan` always; `apply` on any of the three
    deploy branches (idempotent — whichever runs first creates it).
-2. **Build & Push** — `az acr build` tags the image `$(Build.BuildId)` in the shared registry.
-3. **Security Scan** — Trivy scans that image for HIGH/CRITICAL CVEs; a failure blocks every
+3. **Build & Push** — `az acr build` tags the image `$(Build.BuildId)` in the shared registry.
+4. **Security Scan** — Trivy scans that image for HIGH/CRITICAL CVEs; a failure blocks every
    environment's deploy.
-4. **Terraform + Deploy per environment** (`pipelines/templates/deploy-environment.yml`, invoked
+5. **Terraform + Deploy per environment** (`pipelines/templates/deploy-environment.yml`, invoked
    once per environment) — gated by branch:
    - `develop` → **dev**: Terraform apply, then deploy via `kubectl apply -k k8s/overlays/dev`
    - `test` → **test**: same, `k8s/overlays/test`
@@ -80,6 +96,17 @@ curl -X POST localhost:5000/prescriptions -H "Content-Type: application/json" \
   -d '{"patient_id":1,"medication_id":1,"dosage":"1 tablet 3x/day","quantity":21,"prescribed_by":"Dr. Smith"}'
 curl -X POST localhost:5000/prescriptions/1/dispense
 ```
+
+### Running tests
+
+```bash
+cd app
+pip install -r requirements-dev.txt
+pytest
+```
+
+Tests run against a temporary SQLite file (set up in `conftest.py` before `app` is imported) so
+they don't need Postgres or any Azure resource.
 
 ## Infrastructure
 

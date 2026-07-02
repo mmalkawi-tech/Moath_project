@@ -34,7 +34,34 @@ variables:
 
 stages:
   # ---------------------------------------------------------------------
-  # 1. Terraform for the shared ACR (created once, applied idempotently
+  # 1. Unit tests - run on every push/PR, gates the build
+  # ---------------------------------------------------------------------
+  - stage: Test
+    displayName: 'Unit Tests'
+    jobs:
+      - job: PytestJob
+        displayName: 'pytest'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.12'
+
+          - script: |
+              set -e
+              cd app
+              pip install -r requirements-dev.txt
+              pytest --junitxml=$(System.DefaultWorkingDirectory)/test-results.xml
+            displayName: 'Install deps & run pytest'
+
+          - task: PublishTestResults@2
+            condition: always()
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: 'test-results.xml'
+              searchFolder: '$(System.DefaultWorkingDirectory)'
+
+  # ---------------------------------------------------------------------
+  # 2. Terraform for the shared ACR (created once, applied idempotently
   #    from whichever of the three deploy branches runs first)
   # ---------------------------------------------------------------------
   - stage: TerraformACR
@@ -82,11 +109,13 @@ stages:
                 fi
 
   # ---------------------------------------------------------------------
-  # 2. Build & push the Docker image to the shared ACR
+  # 3. Build & push the Docker image to the shared ACR
   # ---------------------------------------------------------------------
   - stage: BuildAndPush
     displayName: 'Build & Push Image'
-    dependsOn: TerraformACR
+    dependsOn:
+      - Test
+      - TerraformACR
     condition: and(succeeded(), or(eq(variables.isDev, true), eq(variables.isTest, true), eq(variables.isMain, true)))
     jobs:
       - job: BuildJob
@@ -106,7 +135,7 @@ stages:
                   ./app
 
   # ---------------------------------------------------------------------
-  # 3. Security scan: Trivy image scan gates every environment's deploy
+  # 4. Security scan: Trivy image scan gates every environment's deploy
   # ---------------------------------------------------------------------
   - stage: SecurityScan
     displayName: 'Container Image Scan (Trivy)'
@@ -135,7 +164,7 @@ stages:
                   $(acrName).azurecr.io/$(imageName):$(Build.BuildId)
 
   # ---------------------------------------------------------------------
-  # 4. Per-environment Terraform + deploy, gated by branch
+  # 5. Per-environment Terraform + deploy, gated by branch
   # ---------------------------------------------------------------------
   - template: pipelines/templates/deploy-environment.yml
     parameters:

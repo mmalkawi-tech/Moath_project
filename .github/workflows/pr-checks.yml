@@ -1,0 +1,81 @@
+name: PR Checks
+
+# Fast, credential-free feedback on every PR - no Azure access needed.
+# The heavier Azure DevOps pipeline (build, Trivy scan, deploy) still gates
+# the actual environments; this just catches issues before that runs.
+
+on:
+  pull_request:
+    branches: [main, test, develop]
+
+jobs:
+  python-tests:
+    name: Python tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        working-directory: app
+        run: pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        working-directory: app
+        run: pytest
+
+  terraform-fmt:
+    name: Terraform format check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.7.5'
+
+      - name: terraform fmt -check
+        working-directory: terraform
+        run: terraform fmt -check -recursive
+
+  terraform-validate:
+    name: Terraform validate
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        root: [acr, environments/dev, environments/test, environments/production]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.7.5'
+
+      - name: terraform init (no backend)
+        working-directory: terraform/${{ matrix.root }}
+        run: terraform init -backend=false -input=false
+
+      - name: terraform validate
+        working-directory: terraform/${{ matrix.root }}
+        run: terraform validate
+
+  tfsec:
+    name: IaC security scan (tfsec)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Scanning `terraform/` as one blob doesn't work: tfsec treats each
+        # directory as its own root and stops after the first one it finds,
+        # silently skipping the rest. Scanning each root module individually
+        # resolves its `module` blocks and transitively scans modules/* too.
+        root: [acr, environments/dev, environments/test, environments/production]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tfsec
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: terraform/${{ matrix.root }}
