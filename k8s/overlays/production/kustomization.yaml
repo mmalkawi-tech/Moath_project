@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: production
+
+resources:
+  - ../../base
+
+# Production is the only environment exposed publicly - dev/test stay
+# ClusterIP (reached via `kubectl port-forward`) to avoid paying for a
+# LoadBalancer + public IP per non-prod environment.
+patches:
+  - path: service-patch.yaml
+    target:
+      kind: Service
+      name: moathclinic-service
+
+replicas:
+  - name: moathclinic-app
+    count: 2
+
+images:
+  - name: moathclinicacr.azurecr.io/moathclinic-app
+    newTag: __IMAGE_TAG__

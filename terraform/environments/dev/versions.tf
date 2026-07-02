@@ -16,6 +16,6 @@ terraform {
     resource_group_name  = "moathclinic-tfstate-rg"
     storage_account_name = "moathclinictfstate123"
     container_name       = "tfstate"
-    key                  = "moathclinic.terraform.tfstate"
+    key                  = "moathclinic-dev.terraform.tfstate"
   }
 }

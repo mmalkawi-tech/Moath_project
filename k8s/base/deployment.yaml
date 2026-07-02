@@ -5,7 +5,7 @@ metadata:
   labels:
     app: moathclinic-app
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: moathclinic-app
@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: moathclinic-app
-          image: __IMAGE__
+          image: moathclinicacr.azurecr.io/moathclinic-app:latest
           ports:
             - containerPort: 5000
           env:
@@ -30,6 +30,13 @@ spec:
                 secretKeyRef:
                   name: moathclinic-appinsights-secret
                   key: APPLICATIONINSIGHTS_CONNECTION_STRING
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
           livenessProbe:
             httpGet:
               path: /health
