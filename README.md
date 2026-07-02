@@ -1,36 +1,64 @@
 # Moath Clinic
 
-A pharmacy & prescription management API, deployed to Azure with a fully automated CI/CD
-pipeline, container image scanning, and Azure Monitor observability.
+A pharmacy & prescription management API, deployed to Azure across **dev / test / production**
+environments with a fully automated CI/CD pipeline, container image scanning, and Azure Monitor
+observability. Every resource is sized on the cheapest viable Azure tier.
 
 ## Stack
 
 - **App**: Python/Flask + SQLAlchemy, containerized with Docker (`app/`)
-- **Infrastructure**: Terraform on Azure (`terraform/`) — resource group, Azure Container
-  Registry, AKS cluster (with Container Insights), Postgres Flexible Server, Log Analytics
-  Workspace + Application Insights, remote state in Azure Blob Storage
-- **Runtime**: Kubernetes manifests for AKS (`k8s/`) — Deployment + LoadBalancer Service
-- **CI/CD**: Azure DevOps Pipeline (`azure-pipelines.yml`), source hosted on GitHub
+- **Infrastructure**: Terraform on Azure (`terraform/`) — a shared ACR plus one isolated
+  environment (resource group, AKS, Postgres Flexible Server, Log Analytics + App Insights) per
+  dev/test/production, built from reusable modules; remote state in Azure Blob Storage, one
+  state file per environment
+- **Runtime**: Kubernetes manifests for AKS (`k8s/`) — Kustomize base + per-environment overlays
+- **CI/CD**: Azure DevOps Pipeline (`azure-pipelines.yml` + `pipelines/templates/`), source
+  hosted on GitHub
 - **Security**: Trivy container image scan gates every deploy
 - **Monitoring**: Azure Monitor Container Insights (cluster/pod metrics & logs) + Application
-  Insights (in-app request/exception telemetry via `opencensus`)
+  Insights (in-app request/exception telemetry via `opencensus`) — one workspace per environment
 
 See [docs/architecture.md](docs/architecture.md) for the full diagram and component breakdown.
 
+## Environments
+
+| Environment | Branch | AKS nodes | VM size | Postgres SKU | Public access |
+|---|---|---|---|---|---|
+| dev | `develop` | 1 | `Standard_B2s` (burstable) | `B_Standard_B1ms` (burstable) | `kubectl port-forward` only |
+| test | `test` | 1 | `Standard_B2s` (burstable) | `B_Standard_B1ms` (burstable) | `kubectl port-forward` only |
+| production | `main` | 2 | `Standard_B2s` (burstable) | `B_Standard_B1ms` (burstable) | LoadBalancer (public IP) |
+
+Cost choices, applied everywhere:
+- **AKS**: `sku_tier = "Free"` control plane (no uptime-SLA charge), burstable `B2s` nodes, 1 node
+  in dev/test (2 in production for basic availability — not 3, to stay cheap)
+- **ACR**: a single **Basic**-tier registry shared by all three environments (build once, same
+  image promoted by tag — one registry instead of three)
+- **Postgres**: burstable `B_Standard_B1ms`, smallest allowed storage (32GB), one server per
+  environment with its own database/credentials (kept separate for isolation — this is the one
+  place environments are *not* shared)
+- **Log Analytics**: 30-day retention (the minimum for `PerGB2018`, cheapest tier)
+- **Networking**: dev/test stay `ClusterIP` (no public IP / LoadBalancer cost); only production
+  gets a `LoadBalancer` Service
+
 ## Pipeline
 
-Triggered on every push/PR to `main`, four stages:
+Triggered on every push/PR to `main`, `test`, or `develop`. Stages:
 
-1. **Terraform** — `init` / `validate` / `plan` always; `apply` only when running on `main`.
-   Publishes DB connection details, the ACR login server, and the App Insights connection
-   string as pipeline outputs for later stages.
-2. **Build & Push** — `az acr build` builds the Docker image directly in ACR and tags it with
-   both `latest` and the build ID. Runs only on `main`.
-3. **Security Scan** — installs Trivy and scans the freshly built image for HIGH/CRITICAL CVEs;
-   fails the pipeline (blocking deploy) if any unfixed vulnerabilities are found.
-4. **Deploy to AKS** — fetches AKS credentials, creates/updates the `moathclinic-db-secret` and
-   `moathclinic-appinsights-secret` from the Terraform outputs, injects the freshly built image
-   tag into `k8s/deployment.yaml`, applies the manifests, and waits for rollout.
+1. **Terraform - Shared ACR** — `init`/`validate`/`plan` always; `apply` on any of the three
+   deploy branches (idempotent — whichever runs first creates it).
+2. **Build & Push** — `az acr build` tags the image `$(Build.BuildId)` in the shared registry.
+3. **Security Scan** — Trivy scans that image for HIGH/CRITICAL CVEs; a failure blocks every
+   environment's deploy.
+4. **Terraform + Deploy per environment** (`pipelines/templates/deploy-environment.yml`, invoked
+   once per environment) — gated by branch:
+   - `develop` → **dev**: Terraform apply, then deploy via `kubectl apply -k k8s/overlays/dev`
+   - `test` → **test**: same, `k8s/overlays/test`
+   - `main` → **production**: same, `k8s/overlays/production` — gated behind the
+     `moathclinic-production` Azure DevOps environment's approval check
+
+Each environment stage creates its Kubernetes namespace, the `moathclinic-db-secret` and
+`moathclinic-appinsights-secret` from that environment's own Terraform outputs, then applies the
+matching Kustomize overlay and waits for rollout.
 
 ## Local development
 
@@ -55,8 +83,29 @@ curl -X POST localhost:5000/prescriptions/1/dispense
 
 ## Infrastructure
 
-Before the first `terraform init`, the remote state backend must exist (Terraform can't create
-its own backend storage):
+### Layout
+
+```
+terraform/
+├── modules/            # reusable building blocks — no state of their own
+│   ├── aks/
+│   ├── database/
+│   └── monitoring/
+├── acr/                 # shared registry — own state, applied once
+└── environments/
+    ├── dev/              # own state, own resource group, calls the modules
+    ├── test/
+    └── production/
+```
+
+Each of `acr/` and `environments/{dev,test,production}/` is an independent root module with its
+own remote-state key — a change (or a broken `plan`) in one environment can't corrupt another's
+state.
+
+### One-time setup
+
+The remote state backend must exist before any `terraform init` (Terraform can't create its own
+backend storage):
 
 ```bash
 az group create --name moathclinic-tfstate-rg --location eastus
@@ -65,24 +114,67 @@ az storage account create --name moathclinictfstate123 --resource-group moathcli
 az storage container create --name tfstate --account-name moathclinictfstate123
 ```
 
-Then:
+Apply the shared ACR first (environments read its state via `terraform_remote_state`):
 
 ```bash
-cd terraform
+cd terraform/acr
+terraform init
+terraform apply
+```
+
+Then each environment:
+
+```bash
+cd terraform/environments/dev   # or test / production
 terraform init
 terraform plan
 terraform apply
 ```
 
-State is stored remotely in the `moathclinic-tfstate-rg` / `moathclinictfstate123` storage
-account — never commit `*.tfstate` (already gitignored).
+State is stored remotely in `moathclinic-tfstate-rg` / `moathclinictfstate123`, one blob per
+environment (`moathclinic-acr.terraform.tfstate`, `moathclinic-dev.terraform.tfstate`, etc.) —
+never commit `*.tfstate` (already gitignored).
 
 ## Prerequisites for the pipeline
 
 - Azure DevOps service connection `moath-sp-new` (Azure Resource Manager, scoped to the target
   subscription)
 - GitHub service connection authorizing the Azure DevOps project to read this repo
-- Environment `moathclinic-production` (auto-created on first deploy; add an approval check on
-  it to require manual sign-off before deploys)
+- Three Azure DevOps environments: `moathclinic-dev`, `moathclinic-test`,
+  `moathclinic-production` (auto-created on first deploy to each; add an approval check on
+  `moathclinic-production` to require manual sign-off before prod deploys)
+- `develop` and `test` branches created in the repo (in addition to `main`) — the pipeline
+  deploys to dev/test only when those branches are pushed to
 - Trivy needs no separate credentials — it authenticates against ACR via `az acr login` in the
   same pipeline identity as the build stage
+
+## Branching & contribution workflow
+
+`main` is treated as protected — it should only ever move forward via a reviewed pull request,
+never a direct push (infrastructure changes go through `terraform plan` on the PR before anyone
+applies them). Feature branches merge into `develop`; `develop` promotes to `test`; `test`
+promotes to `main` for production.
+
+1. Branch off `develop`: `git checkout -b <type>/<short-description>` (`feat/`, `fix/`,
+   `chore/`, `infra/` prefixes)
+2. Commit, push the branch, open a PR into `develop` (auto-deploys to **dev** once merged)
+3. Promote via PR: `develop` → `test` (deploys to **test**), `test` → `main` (deploys to
+   **production**, behind the approval gate)
+
+**One-time setup (GitHub UI or `gh` CLI, needs repo admin access):**
+
+Settings → Branches → Add a branch protection rule for `main` (and optionally `test`/`develop`):
+- Require a pull request before merging
+- Require conversation resolution before merging
+- (Once CI checks are wired to GitHub) require status checks to pass before merging
+
+Equivalent with the GitHub CLI, once authenticated (`gh auth login`):
+
+```bash
+gh api repos/mmalkawi-tech/Moath_project/branches/main/protection \
+  --method PUT \
+  -f required_pull_request_reviews.required_approving_review_count=1 \
+  -F enforce_admins=true \
+  -F required_status_checks=null \
+  -F restrictions=null
+```

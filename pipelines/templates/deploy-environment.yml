@@ -1,0 +1,138 @@
+parameters:
+  - name: environmentName # dev | test | production
+    type: string
+  - name: terraformDir
+    type: string
+  - name: k8sNamespace
+    type: string
+  - name: adoEnvironment # Azure DevOps environment, for approval gates
+    type: string
+  - name: branchCondition # runtime expression string
+    type: string
+
+stages:
+  # -------------------------------------------------------------------------
+  # Terraform for this environment: own resource group, AKS, Postgres,
+  # monitoring - reads the shared ACR via remote state, does not create one.
+  # -------------------------------------------------------------------------
+  - stage: Terraform_${{ parameters.environmentName }}
+    displayName: 'Terraform - ${{ parameters.environmentName }}'
+    dependsOn: []
+    condition: ${{ parameters.branchCondition }}
+    jobs:
+      - job: TerraformJob
+        displayName: 'Terraform'
+        steps:
+          - task: Bash@3
+            displayName: 'Install Terraform $(terraformVersion)'
+            inputs:
+              targetType: inline
+              script: |
+                set -e
+                curl -sLo /tmp/terraform.zip https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip
+                unzip -o /tmp/terraform.zip -d /tmp/tfinstall
+                sudo mv /tmp/tfinstall/terraform /usr/local/bin/
+                terraform version
+
+          - task: AzureCLI@2
+            name: tf
+            displayName: 'Terraform Init / Plan / Apply'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -e
+                export ARM_CLIENT_ID=$servicePrincipalId
+                export ARM_TENANT_ID=$tenantId
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+                export ARM_USE_OIDC=true
+                export ARM_OIDC_TOKEN=$idToken
+
+                cd ${{ parameters.terraformDir }}
+                terraform init -input=false
+                terraform validate
+                terraform plan -input=false -out=tfplan
+                terraform apply -input=false -auto-approve tfplan
+
+                echo "##vso[task.setvariable variable=dbFqdn;isOutput=true]$(terraform output -raw db_fqdn)"
+                echo "##vso[task.setvariable variable=dbPassword;isOutput=true;issecret=true]$(terraform output -raw db_password)"
+                echo "##vso[task.setvariable variable=dbName;isOutput=true]$(terraform output -raw db_name)"
+                echo "##vso[task.setvariable variable=dbAdminLogin;isOutput=true]$(terraform output -raw db_admin_login)"
+                echo "##vso[task.setvariable variable=appInsightsConnectionString;isOutput=true;issecret=true]$(terraform output -raw app_insights_connection_string)"
+                echo "##vso[task.setvariable variable=resourceGroupName;isOutput=true]$(terraform output -raw resource_group_name)"
+                echo "##vso[task.setvariable variable=aksClusterName;isOutput=true]$(terraform output -raw aks_cluster_name)"
+
+  # -------------------------------------------------------------------------
+  # Deploy the already-built, already-scanned image into this environment
+  # -------------------------------------------------------------------------
+  - stage: Deploy_${{ parameters.environmentName }}
+    displayName: 'Deploy - ${{ parameters.environmentName }}'
+    dependsOn:
+      - Terraform_${{ parameters.environmentName }}
+      - BuildAndPush
+      - SecurityScan
+    condition: ${{ parameters.branchCondition }}
+    variables:
+      dbFqdn: $[ stageDependencies.Terraform_${{ parameters.environmentName }}.TerraformJob.outputs['tf.dbFqdn'] ]
+      dbPassword: $[ stageDependencies.Terraform_${{ parameters.environmentName }}.TerraformJob.outputs['tf.dbPassword'] ]
+      dbName: $[ stageDependencies.Terraform_${{ parameters.environmentName }}.TerraformJob.outputs['tf.dbName'] ]
+      dbAdminLogin: $[ stageDependencies.Terraform_${{ parameters.environmentName }}.TerraformJob.outputs['tf.dbAdminLogin'] ]
+      appInsightsConnectionString: $[ stageDependencies.Terraform_${{ parameters.environmentName }}.TerraformJob.outputs['tf.appInsightsConnectionString'] ]
+      resourceGroupName: $[ stageDependencies.Terraform_${{ parameters.environmentName }}.TerraformJob.outputs['tf.resourceGroupName'] ]
+      aksClusterName: $[ stageDependencies.Terraform_${{ parameters.environmentName }}.TerraformJob.outputs['tf.aksClusterName'] ]
+    jobs:
+      - deployment: Deploy
+        displayName: 'Deploy manifests'
+        environment: '${{ parameters.adoEnvironment }}'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - task: AzureCLI@2
+                  displayName: 'Get AKS credentials'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -e
+                      az aks get-credentials \
+                        --resource-group $(resourceGroupName) \
+                        --name $(aksClusterName) \
+                        --overwrite-existing
+
+                - task: AzureCLI@2
+                  displayName: 'Create namespace & secrets'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -e
+                      kubectl create namespace ${{ parameters.k8sNamespace }} \
+                        --dry-run=client -o yaml | kubectl apply -f -
+
+                      DATABASE_URL="postgresql://$(dbAdminLogin):$(dbPassword)@$(dbFqdn):5432/$(dbName)?sslmode=require"
+                      kubectl create secret generic moathclinic-db-secret -n ${{ parameters.k8sNamespace }} \
+                        --from-literal=DATABASE_URL="$DATABASE_URL" \
+                        --dry-run=client -o yaml | kubectl apply -f -
+
+                      kubectl create secret generic moathclinic-appinsights-secret -n ${{ parameters.k8sNamespace }} \
+                        --from-literal=APPLICATIONINSIGHTS_CONNECTION_STRING="$(appInsightsConnectionString)" \
+                        --dry-run=client -o yaml | kubectl apply -f -
+
+                - task: AzureCLI@2
+                  displayName: 'Apply manifests (kustomize)'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -e
+                      cd $(System.DefaultWorkingDirectory)/k8s/overlays/${{ parameters.environmentName }}
+                      sed -i "s#__IMAGE_TAG__#$(Build.BuildId)#" kustomization.yaml
+                      kubectl apply -k .
+                      kubectl rollout status deployment/moathclinic-app -n ${{ parameters.k8sNamespace }} --timeout=120s

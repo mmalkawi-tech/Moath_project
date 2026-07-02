@@ -4,6 +4,12 @@ variable "project_name" {
   default     = "moathclinic"
 }
 
+variable "environment" {
+  description = "Environment name"
+  type        = string
+  default     = "production"
+}
+
 variable "location" {
   description = "Azure region"
   type        = string
@@ -11,7 +17,7 @@ variable "location" {
 }
 
 variable "aks_node_count" {
-  description = "Number of nodes in the AKS default node pool"
+  description = "Number of nodes in the AKS default node pool (2 for basic availability, still the cheapest VM size)"
   type        = number
   default     = 2
 }

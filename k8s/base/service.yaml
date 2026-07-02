@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: moathclinic-service
+spec:
+  # ClusterIP by default - dev/test are reached via `kubectl port-forward`
+  # to avoid paying for a public LoadBalancer/IP per non-prod environment.
+  # The production overlay patches this to LoadBalancer.
+  type: ClusterIP
+  selector:
+    app: moathclinic-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 5000
