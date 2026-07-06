@@ -13,6 +13,12 @@ variable "location" {
   type        = string
 }
 
+variable "db_location" {
+  description = "Azure region for the Postgres server specifically - defaults to eastus2 because this subscription's Postgres Flexible Server offer is restricted in eastus (see LocationIsOfferRestricted)"
+  type        = string
+  default     = "eastus2"
+}
+
 variable "resource_group_name" {
   description = "Resource group the database is deployed into"
   type        = string

@@ -4,9 +4,12 @@ resource "random_password" "db_password" {
 }
 
 resource "azurerm_postgresql_flexible_server" "main" {
-  name                          = "${var.project_name}-${var.environment}-psql"
+  # "psql2" not "psql": Azure left a sticky cross-region name reservation
+  # behind after a failed create in the wrong region (a subscription-level
+  # location restriction, not a config error) - renaming sidesteps it.
+  name                          = "${var.project_name}-${var.environment}-psql2"
   resource_group_name           = var.resource_group_name
-  location                      = var.location
+  location                      = var.db_location
   version                       = "16"
   administrator_login           = "${var.project_name}_admin"
   administrator_password        = random_password.db_password.result
