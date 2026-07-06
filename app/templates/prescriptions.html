@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Prescriptions - Moath Clinic{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">Prescriptions</h4>
+  {% if patients and medications %}
+    <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addPrescriptionModal">
+      <i class="bi bi-plus-lg"></i> New Prescription
+    </button>
+  {% else %}
+    <span class="text-muted small">Add a patient and a medication first</span>
+  {% endif %}
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-hover mb-0 align-middle">
+      <thead>
+        <tr>
+          <th>#</th><th>Patient</th><th>Medication</th><th>Dosage</th><th>Qty</th>
+          <th>Prescribed by</th><th>Status</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in prescriptions %}
+          <tr>
+            <td class="text-muted">{{ p.id }}</td>
+            <td>{{ p.patient.full_name }}</td>
+            <td>{{ p.medication.name }}</td>
+            <td>{{ p.dosage }}</td>
+            <td>{{ p.quantity }}</td>
+            <td>{{ p.prescribed_by }}</td>
+            <td>
+              {% if p.dispensed == 'yes' %}
+                <span class="badge bg-success">dispensed</span>
+              {% else %}
+                <span class="badge bg-warning text-dark">pending</span>
+              {% endif %}
+            </td>
+            <td class="text-end">
+              {% if p.dispensed != 'yes' %}
+                <form method="POST" action="/prescriptions/{{ p.id }}/dispense" class="d-inline">
+                  <button type="submit" class="btn btn-outline-success btn-sm">Dispense</button>
+                </form>
+              {% endif %}
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="8" class="text-center text-muted py-5">No prescriptions yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="modal fade" id="addPrescriptionModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <form method="POST" action="/prescriptions" class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">New Prescription</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label">Patient</label>
+          <select name="patient_id" class="form-select" required>
+            {% for pt in patients %}
+              <option value="{{ pt.id }}">{{ pt.full_name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Medication</label>
+          <select name="medication_id" class="form-select" required>
+            {% for m in medications %}
+              <option value="{{ m.id }}">{{ m.name }} ({{ m.stock_quantity }} in stock)</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Dosage</label>
+          <input type="text" name="dosage" class="form-control" placeholder="e.g. 1 tablet 3x/day" required>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Quantity</label>
+          <input type="number" name="quantity" class="form-control" min="1" required>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Prescribed by</label>
+          <input type="text" name="prescribed_by" class="form-control" placeholder="Dr. ..." required>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="submit" class="btn btn-primary">Create</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% endblock %}

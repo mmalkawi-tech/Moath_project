@@ -85,16 +85,19 @@ pip install -r requirements.txt
 python app.py   # serves on :5000 against sqlite:///local_dev.db by default
 ```
 
-Try it out:
+Open http://localhost:5000 for the web UI — a dashboard plus Patients, Medications, and
+Prescriptions pages (add records via the "+" buttons, dispense a prescription with one click).
+
+The same data is available as a JSON API under `/api/`:
 
 ```bash
-curl -X POST localhost:5000/patients -H "Content-Type: application/json" \
+curl -X POST localhost:5000/api/patients -H "Content-Type: application/json" \
   -d '{"full_name":"Jane Doe","date_of_birth":"1990-01-01"}'
-curl -X POST localhost:5000/medications -H "Content-Type: application/json" \
+curl -X POST localhost:5000/api/medications -H "Content-Type: application/json" \
   -d '{"name":"Amoxicillin 500mg","stock_quantity":100,"unit_price":4.5,"expiry_date":"2027-01-01"}'
-curl -X POST localhost:5000/prescriptions -H "Content-Type: application/json" \
+curl -X POST localhost:5000/api/prescriptions -H "Content-Type: application/json" \
   -d '{"patient_id":1,"medication_id":1,"dosage":"1 tablet 3x/day","quantity":21,"prescribed_by":"Dr. Smith"}'
-curl -X POST localhost:5000/prescriptions/1/dispense
+curl -X POST localhost:5000/api/prescriptions/1/dispense
 ```
 
 ### Running tests
