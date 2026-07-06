@@ -12,3 +12,12 @@ resource "azurerm_container_registry" "acr" {
   sku                 = "Basic"
   admin_enabled       = true
 }
+
+# NOTE: cannot grant the pipeline's service principal rights to manage
+# role assignments here (tried "User Access Administrator" scoped to just
+# this ACR) - this subscription has an ABAC condition on every Owner
+# role assignment that blocks granting privileged/access-management roles
+# to anyone, including from an Owner account. This is a deliberate
+# anti-privilege-escalation guardrail on the shared training subscription,
+# not a bug to route around. See README's "Known limitation" section for
+# the operational consequence and workaround.
