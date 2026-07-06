@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - Moath Clinic{% endblock %}
+{% block content %}
+
+<div class="row g-3 mb-4">
+  <div class="col-6 col-md-3">
+    <div class="card p-3">
+      <div class="text-muted small">Patients</div>
+      <div class="stat-value">{{ patient_count }}</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card p-3">
+      <div class="text-muted small">Medications</div>
+      <div class="stat-value">{{ medication_count }}</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card p-3">
+      <div class="text-muted small">Prescriptions</div>
+      <div class="stat-value">{{ prescription_count }}</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card p-3">
+      <div class="text-muted small">Low stock</div>
+      <div class="stat-value {{ 'text-danger' if low_stock_meds else '' }}">{{ low_stock_meds|length }}</div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3">
+  <div class="col-md-6">
+    <div class="card p-3 h-100">
+      <h6 class="mb-3">Low stock medications <span class="text-muted fw-normal">(under 10 units)</span></h6>
+      {% if low_stock_meds %}
+        <ul class="list-group list-group-flush">
+          {% for m in low_stock_meds %}
+            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
+              <span>{{ m.name }}</span>
+              <span class="low-stock">{{ m.stock_quantity }} left</span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="text-muted mb-0">All medications are well stocked.</p>
+      {% endif %}
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card p-3 h-100">
+      <h6 class="mb-3">Recent prescriptions</h6>
+      {% if recent_prescriptions %}
+        <ul class="list-group list-group-flush">
+          {% for p in recent_prescriptions %}
+            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
+              <span>{{ p.patient.full_name }} &rarr; {{ p.medication.name }}</span>
+              {% if p.dispensed == 'yes' %}
+                <span class="badge bg-success">dispensed</span>
+              {% else %}
+                <span class="badge bg-warning text-dark">pending</span>
+              {% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="text-muted mb-0">No prescriptions yet.</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% endblock %}

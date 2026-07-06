@@ -115,6 +115,21 @@ The Azure DevOps pipeline (`azure-pipelines.yml`) does the real build/scan/deplo
 - **Prescription** — id, patient_id, medication_id, dosage, quantity, prescribed_by,
   prescribed_at, dispensed
 
-Dispensing a prescription (`POST /prescriptions/<id>/dispense`) atomically decrements
-`Medication.stock_quantity` and marks the prescription as dispensed, rejecting the request with
-a 400 if stock is insufficient.
+Dispensing a prescription (`POST /api/prescriptions/<id>/dispense` for the JSON API, or the
+"Dispense" button on `/prescriptions` for the GUI — both share the same `_dispense()` logic in
+`app.py`) atomically decrements `Medication.stock_quantity` and marks the prescription as
+dispensed, rejecting the request with a 400 if stock is insufficient.
+
+## Web UI
+
+Server-rendered with Flask + Jinja2 (`app/templates/`), styled with Bootstrap 5 via CDN (no
+frontend build step — kept out of the Docker image and CI entirely):
+
+- `/` — dashboard: patient/medication/prescription counts, low-stock medications, recent
+  prescriptions
+- `/patients`, `/medications`, `/prescriptions` — table views with a modal "add" form each;
+  prescriptions additionally get a one-click "Dispense" button per pending row
+
+The GUI and the `/api/*` JSON endpoints share the same SQLAlchemy models and, for dispensing,
+the same `_dispense()` helper — the GUI redirects with a flash message on success/error, the API
+returns JSON with the matching status code.

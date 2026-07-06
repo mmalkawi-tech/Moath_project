@@ -1,15 +1,16 @@
 """
-Moath Clinic - Pharmacy & Prescription Management API
+Moath Clinic - Pharmacy & Prescription Management
 """
 import os
 from datetime import date, datetime
 
-from flask import Flask, jsonify, request
+from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
 
 from sqlalchemy import Column, Date, DateTime, Float, ForeignKey, Integer, String, create_engine
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "dev-only-insecure-secret-change-in-production")
 
 APPINSIGHTS_CONNECTION_STRING = os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING")
 if APPINSIGHTS_CONNECTION_STRING:
@@ -62,13 +63,187 @@ class Prescription(Base):
 Base.metadata.create_all(engine)
 
 
+class DispenseError(Exception):
+    def __init__(self, message, status_code, available=None):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.available = available
+
+
+def _dispense(prescription_id, session):
+    prescription = session.get(Prescription, prescription_id)
+    if prescription is None:
+        raise DispenseError("Prescription not found.", 404)
+    if prescription.dispensed == "yes":
+        raise DispenseError("Prescription already dispensed.", 400)
+
+    medication = session.get(Medication, prescription.medication_id)
+    if medication.stock_quantity < prescription.quantity:
+        raise DispenseError(
+            f"Insufficient stock ({medication.stock_quantity} available).",
+            400,
+            available=medication.stock_quantity,
+        )
+
+    medication.stock_quantity -= prescription.quantity
+    prescription.dispensed = "yes"
+    session.commit()
+    return prescription, medication
+
+
 @app.get("/health")
 def health():
     return jsonify(status="ok", time=datetime.utcnow().isoformat()), 200
 
 
+# ---------------------------------------------------------------------
+# GUI (server-rendered HTML)
+# ---------------------------------------------------------------------
+
+
+@app.get("/")
+def dashboard():
+    session = SessionLocal()
+    try:
+        low_stock_meds = (
+            session.query(Medication)
+            .filter(Medication.stock_quantity < 10)
+            .order_by(Medication.stock_quantity)
+            .all()
+        )
+        recent_prescriptions = (
+            session.query(Prescription).order_by(Prescription.prescribed_at.desc()).limit(5).all()
+        )
+        return render_template(
+            "dashboard.html",
+            active="dashboard",
+            patient_count=session.query(Patient).count(),
+            medication_count=session.query(Medication).count(),
+            prescription_count=session.query(Prescription).count(),
+            low_stock_meds=low_stock_meds,
+            recent_prescriptions=recent_prescriptions,
+        )
+    finally:
+        session.close()
+
+
 @app.get("/patients")
-def list_patients():
+def patients_page():
+    session = SessionLocal()
+    try:
+        patients = session.query(Patient).order_by(Patient.id.desc()).all()
+        return render_template("patients.html", active="patients", patients=patients)
+    finally:
+        session.close()
+
+
+@app.post("/patients")
+def add_patient():
+    session = SessionLocal()
+    try:
+        patient = Patient(
+            full_name=request.form["full_name"],
+            date_of_birth=request.form["date_of_birth"],
+            phone=request.form.get("phone") or None,
+        )
+        session.add(patient)
+        session.commit()
+        flash(f"Added patient {patient.full_name}.", "success")
+    finally:
+        session.close()
+    return redirect(url_for("patients_page"))
+
+
+@app.get("/medications")
+def medications_page():
+    session = SessionLocal()
+    try:
+        medications = session.query(Medication).order_by(Medication.id.desc()).all()
+        return render_template("medications.html", active="medications", medications=medications)
+    finally:
+        session.close()
+
+
+@app.post("/medications")
+def add_medication():
+    session = SessionLocal()
+    try:
+        medication = Medication(
+            name=request.form["name"],
+            stock_quantity=int(request.form.get("stock_quantity", 0)),
+            unit_price=float(request.form["unit_price"]),
+            expiry_date=date.fromisoformat(request.form["expiry_date"]),
+        )
+        session.add(medication)
+        session.commit()
+        flash(f"Added medication {medication.name}.", "success")
+    finally:
+        session.close()
+    return redirect(url_for("medications_page"))
+
+
+@app.get("/prescriptions")
+def prescriptions_page():
+    session = SessionLocal()
+    try:
+        prescriptions = session.query(Prescription).order_by(Prescription.id.desc()).all()
+        patients = session.query(Patient).all()
+        medications = session.query(Medication).all()
+        return render_template(
+            "prescriptions.html",
+            active="prescriptions",
+            prescriptions=prescriptions,
+            patients=patients,
+            medications=medications,
+        )
+    finally:
+        session.close()
+
+
+@app.post("/prescriptions")
+def add_prescription():
+    session = SessionLocal()
+    try:
+        prescription = Prescription(
+            patient_id=int(request.form["patient_id"]),
+            medication_id=int(request.form["medication_id"]),
+            dosage=request.form["dosage"],
+            quantity=int(request.form["quantity"]),
+            prescribed_by=request.form["prescribed_by"],
+        )
+        session.add(prescription)
+        session.commit()
+        flash(f"Created prescription #{prescription.id}.", "success")
+    finally:
+        session.close()
+    return redirect(url_for("prescriptions_page"))
+
+
+@app.post("/prescriptions/<int:prescription_id>/dispense")
+def dispense_prescription_ui(prescription_id):
+    session = SessionLocal()
+    try:
+        prescription, medication = _dispense(prescription_id, session)
+        flash(
+            f"Dispensed prescription #{prescription.id} - {medication.stock_quantity} units of "
+            f"{medication.name} remain.",
+            "success",
+        )
+    except DispenseError as e:
+        flash(e.message, "danger")
+    finally:
+        session.close()
+    return redirect(url_for("prescriptions_page"))
+
+
+# ---------------------------------------------------------------------
+# JSON API
+# ---------------------------------------------------------------------
+
+
+@app.get("/api/patients")
+def api_list_patients():
     session = SessionLocal()
     try:
         patients = session.query(Patient).all()
@@ -80,8 +255,8 @@ def list_patients():
         session.close()
 
 
-@app.post("/patients")
-def create_patient():
+@app.post("/api/patients")
+def api_create_patient():
     data = request.get_json(force=True)
     session = SessionLocal()
     try:
@@ -97,8 +272,8 @@ def create_patient():
         session.close()
 
 
-@app.get("/medications")
-def list_medications():
+@app.get("/api/medications")
+def api_list_medications():
     session = SessionLocal()
     try:
         meds = session.query(Medication).all()
@@ -116,8 +291,8 @@ def list_medications():
         session.close()
 
 
-@app.post("/medications")
-def create_medication():
+@app.post("/api/medications")
+def api_create_medication():
     data = request.get_json(force=True)
     session = SessionLocal()
     try:
@@ -134,8 +309,8 @@ def create_medication():
         session.close()
 
 
-@app.get("/prescriptions")
-def list_prescriptions():
+@app.get("/api/prescriptions")
+def api_list_prescriptions():
     session = SessionLocal()
     try:
         prescriptions = session.query(Prescription).all()
@@ -156,47 +331,9 @@ def list_prescriptions():
         session.close()
 
 
-@app.get("/prescriptions/new")
-def new_prescription_form():
-    session = SessionLocal()
-    try:
-        patients = session.query(Patient).all()
-        medications = session.query(Medication).all()
-    finally:
-        session.close()
-
-    if not patients or not medications:
-        return "<p>Create at least one patient and one medication first.</p>", 200
-
-    patient_options = "".join(f'<option value="{p.id}">{p.full_name} (id {p.id})</option>' for p in patients)
-    medication_options = "".join(f'<option value="{m.id}">{m.name} (id {m.id})</option>' for m in medications)
-    return f"""
-    <!doctype html>
-    <html>
-    <head><title>New Prescription - Moath Clinic</title></head>
-    <body style="font-family: sans-serif; max-width: 480px; margin: 40px auto;">
-      <h2>New Prescription</h2>
-      <form method="POST" action="/prescriptions">
-        <label>Patient</label><br>
-        <select name="patient_id" required>{patient_options}</select><br><br>
-        <label>Medication</label><br>
-        <select name="medication_id" required>{medication_options}</select><br><br>
-        <label>Dosage</label><br>
-        <input type="text" name="dosage" required><br><br>
-        <label>Quantity</label><br>
-        <input type="number" name="quantity" min="1" required><br><br>
-        <label>Prescribed by</label><br>
-        <input type="text" name="prescribed_by" required><br><br>
-        <button type="submit">Create</button>
-      </form>
-    </body>
-    </html>
-    """
-
-
-@app.post("/prescriptions")
-def create_prescription():
-    data = request.get_json(silent=True) or request.form
+@app.post("/api/prescriptions")
+def api_create_prescription():
+    data = request.get_json(force=True)
     session = SessionLocal()
     try:
         prescription = Prescription(
@@ -208,34 +345,22 @@ def create_prescription():
         )
         session.add(prescription)
         session.commit()
-        if request.form:
-            return f"""
-            <p>Prescription #{prescription.id} created.</p>
-            <p><a href="/prescriptions/new">Create another</a></p>
-            """, 201
         return jsonify(id=prescription.id), 201
     finally:
         session.close()
 
 
-@app.post("/prescriptions/<int:prescription_id>/dispense")
-def dispense_prescription(prescription_id):
+@app.post("/api/prescriptions/<int:prescription_id>/dispense")
+def api_dispense_prescription(prescription_id):
     session = SessionLocal()
     try:
-        prescription = session.get(Prescription, prescription_id)
-        if prescription is None:
-            return jsonify(error="prescription not found"), 404
-        if prescription.dispensed == "yes":
-            return jsonify(error="prescription already dispensed"), 400
-
-        medication = session.get(Medication, prescription.medication_id)
-        if medication.stock_quantity < prescription.quantity:
-            return jsonify(error="insufficient stock", available=medication.stock_quantity), 400
-
-        medication.stock_quantity -= prescription.quantity
-        prescription.dispensed = "yes"
-        session.commit()
+        prescription, medication = _dispense(prescription_id, session)
         return jsonify(id=prescription.id, dispensed="yes", remaining_stock=medication.stock_quantity), 200
+    except DispenseError as e:
+        payload = {"error": e.message}
+        if e.available is not None:
+            payload["available"] = e.available
+        return jsonify(**payload), e.status_code
     finally:
         session.close()
 
