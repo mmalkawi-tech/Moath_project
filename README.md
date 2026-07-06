@@ -208,3 +208,25 @@ gh api repos/mmalkawi-tech/Moath_project/branches/main/protection --method PUT -
 (`required_status_checks` is left unset rather than pinned to the current tfsec/terraform-validate
 matrix job names — those change whenever an environment is added or renamed, and a stale required
 check name silently blocks all merges. Revisit once the check set stabilizes.)
+
+## Known limitation: pipeline can't self-manage AKS→ACR role assignments
+
+The `moath-sp-new` service principal (used by the Azure DevOps pipeline) only holds
+**Contributor** at the subscription scope, which excludes
+`Microsoft.Authorization/roleAssignments/write`. That means the pipeline's own `terraform apply`
+fails with `AuthorizationFailed` the first time an environment's AKS cluster (and its AcrPull
+role assignment onto the shared ACR) is created — Contributor can manage resources but not grant
+access to them.
+
+The obvious fix — granting the service principal **User Access Administrator** scoped to just
+the ACR — does not work on this subscription: it's a shared training subscription where every
+Owner role assignment carries an **ABAC condition** blocking anyone (including Owners) from
+granting privileged/access-management roles to anyone else. That's a deliberate
+anti-privilege-escalation guardrail, not a misconfiguration to route around.
+
+**Practical consequence**: the AcrPull role assignment for a brand-new environment's AKS cluster
+must be created once by a subscription Owner running `terraform apply` locally (not via the
+pipeline) — after that, it's recorded in the environment's state and the pipeline's own
+`terraform apply` runs see no change needed for it. This has already been done for dev, test, and
+production. It would only need repeating if an environment's AKS cluster is ever destroyed and
+recreated from scratch.
