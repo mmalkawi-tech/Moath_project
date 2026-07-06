@@ -12,4 +12,4 @@ replicas:
 
 images:
   - name: moathclinicacr.azurecr.io/moathclinic-app
-    newTag: __IMAGE_TAG__
+    newTag: "__IMAGE_TAG__"
